@@ -44,6 +44,8 @@
 #define SINE_TABLE_SIZE 200U
 
 #define ADC_BUFFER_SIZE 2U
+#define ADC_FILTER_SAMPLES 16U
+#define OLED_REFRESH_MS 50U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,7 +62,11 @@ static uint32_t pwm_duty_max = 0U;
 
 static float sin_1[SINE_TABLE_SIZE] = {0};
 
-static uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
+static volatile uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
+static volatile uint16_t adc_display_buffer[ADC_BUFFER_SIZE] = {0};
+
+static float IO = 0.0f; // Output current
+static float UO = 0.0f; // Output voltage
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -134,12 +140,21 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    OLED_NewFrame();
-    OLED_PrintASCIIString(0, 0, "ADC1:", &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintNumber(48, 0, adc_buffer[0], &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintASCIIString(0, 16, "ADC2:", &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintNumber(48, 16, adc_buffer[1], &afont16x8, OLED_COLOR_NORMAL);
-    OLED_ShowFrame();
+
+    // 将均值滤波移至主循环，降低定时器高频中断的CPU占用
+    static uint32_t last_oled_refresh = 0U;
+
+    if ((HAL_GetTick() - last_oled_refresh) >= OLED_REFRESH_MS)
+    {
+      last_oled_refresh = HAL_GetTick();
+
+      OLED_NewFrame();
+      OLED_PrintASCIIString(0, 0, "ADC1:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 0, IO, 2U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 16, "ADC2:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 16, UO, 2U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_ShowFrame();
+    }
   }
   /* USER CODE END 3 */
 }
@@ -197,8 +212,26 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     static int8_t duty_direction = 1;
     static uint16_t index = 0;
+    static uint32_t adc_sum[ADC_BUFFER_SIZE] = {0U};
+    static uint16_t adc_sample_count = 0U;
 
     duty = pwm_duty_min + (uint32_t)((1.0f - sin_1[index]) * (float)(pwm_duty_max - pwm_duty_min)); // Calculate duty cycle based on sine wave
+
+    adc_sum[0] += adc_buffer[0];
+    adc_sum[1] += adc_buffer[1];
+    adc_sample_count++;
+
+    if (adc_sample_count >= ADC_FILTER_SAMPLES)
+    {
+      adc_display_buffer[0] = (uint16_t)(adc_sum[0] / ADC_FILTER_SAMPLES);
+      adc_display_buffer[1] = (uint16_t)(adc_sum[1] / ADC_FILTER_SAMPLES);
+      adc_sum[0] = 0U;
+      adc_sum[1] = 0U;
+      adc_sample_count = 0U;
+    }
+
+    IO = (float)adc_display_buffer[0] * 3.3f / 4095.0f; // Convert ADC value to voltage for current
+    UO = (float)adc_display_buffer[1] * 3.3f / 4095.0f; // Convert ADC value to voltage for output voltage
 
     if (duty_direction > 0)
     {

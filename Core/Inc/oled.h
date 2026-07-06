@@ -31,6 +31,7 @@ void OLED_DrawImage(uint8_t x, uint8_t y, const Image *img, OLED_ColorMode color
 void OLED_PrintASCIIChar(uint8_t x, uint8_t y, char ch, const ASCIIFont *font, OLED_ColorMode color);
 void OLED_PrintASCIIString(uint8_t x, uint8_t y, char *str, const ASCIIFont *font, OLED_ColorMode color);
 void OLED_PrintNumber(uint8_t x, uint8_t y, int num, const ASCIIFont *font, OLED_ColorMode color);
+void OLED_PrintFloat(uint8_t x, uint8_t y, float num, uint8_t decimals, const ASCIIFont *font, OLED_ColorMode color);
 void OLED_PrintString(uint8_t x, uint8_t y, char *str, const Font *font, OLED_ColorMode color);
 
 #endif // __OLED_H__
