@@ -28,6 +28,7 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include "oled.h"
+#include "stm32f4xx_ll_tim.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,10 +38,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PI 3.1416f
+#define PI 3.1415926f
 
-#define PWM_GUARD_COUNTS 0U
-#define PWM_ARR 3600U
+#define PWM_ARR 7199U
+#define DUTY_MIN 100U
+#define DUTY_MAX (PWM_ARR - DUTY_MIN)
 #define SINE_TABLE_SIZE 200U
 
 #define ADC_BUFFER_SIZE 2U
@@ -55,10 +57,9 @@
 
 /* USER CODE BEGIN PV */
 static uint32_t duty = 0U;
-static uint32_t pwm_arr = 0U;
 static uint32_t pwm_duty_span = 0U;
 
-static float sin_table[SINE_TABLE_SIZE] = {0.0f};
+static float sin_1[SINE_TABLE_SIZE] = {0};
 
 static uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
 /* USER CODE END PV */
@@ -66,9 +67,8 @@ static uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-static void SinglePhase(void);
-static void SetActiveSpwmOutput(uint8_t positive_half_cycle);
-static void UpdateSpwmDuty(uint16_t index);
+void SinglePhase(void);
+static void Uint16ToString(uint16_t value, char *buffer);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -111,16 +111,13 @@ int main(void)
   MX_ADC1_Init();
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
-  pwm_duty_span = (PWM_ARR > (2U * PWM_GUARD_COUNTS)) ? (PWM_ARR - (2U * PWM_GUARD_COUNTS)) : 0U;
-
   SinglePhase(); // Generate sine wave values
 
-  __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_1);
-  UpdateSpwmDuty(0U);
-  HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE);
+  // __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_1);
+  // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty); // Set initial duty cycle
+  // __HAL_TIM_GENERATE_EVENT(&htim1, TIM_EVENTSOURCE_UPDATE);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Start PWM on TIM1 Channel 1
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1); // Start complementary PWM on TIM1 Channel 1
-  SetActiveSpwmOutput(1U);
   HAL_TIM_Base_Start_IT(&htim2); // Start TIM2 in interrupt mode
 
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE); // Start ADC1 in DMA mode
@@ -137,11 +134,15 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    char adc_text[6];
+
     OLED_NewFrame();
     OLED_PrintASCIIString(0, 0, "ADC1:", &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintNumber(48, 0, adc_buffer[0], OLED_COLOR_NORMAL);
+    Uint16ToString(adc_buffer[0], adc_text);
+    OLED_PrintASCIIString(48, 0, adc_text, &afont16x8, OLED_COLOR_NORMAL);
     OLED_PrintASCIIString(0, 16, "ADC2:", &afont16x8, OLED_COLOR_NORMAL);
-    OLED_PrintNumber(48, 16, adc_buffer[1], OLED_COLOR_NORMAL);
+    Uint16ToString(adc_buffer[1], adc_text);
+    OLED_PrintASCIIString(48, 16, adc_text, &afont16x8, OLED_COLOR_NORMAL);
     OLED_ShowFrame();
   }
   /* USER CODE END 3 */
@@ -198,18 +199,39 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2) // Check if the interrupt is from TIM2
   {
+    static int8_t duty_direction = 1;
     static uint16_t index = 0;
 
-    UpdateSpwmDuty(index);
-    index++;
-    if (index >= SINE_TABLE_SIZE * 2U) // Wrap around after completing one full sine wave cycle
+    duty = DUTY_MIN + (uint32_t)((1 - sin_1[index]) * (DUTY_MAX - DUTY_MIN)); // Calculate duty cycle based on sine wave
+
+    if (duty_direction > 0)
     {
-      index = 0U;
+      if (index >= (SINE_TABLE_SIZE - 1U))
+      {
+        duty_direction = -1;
+      }
+      else
+      {
+        index++;
+      }
     }
+    else
+    {
+      if (index == 0U)
+      {
+        duty_direction = 1;
+      }
+      else
+      {
+        index--;
+      }
+    }
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty); // Update PWM duty cycle
   }
 }
 
-static void SinglePhase(void)
+void SinglePhase(void)
 {
   for(uint16_t i = 0; i < SINE_TABLE_SIZE; i++ )
   {
@@ -219,31 +241,34 @@ static void SinglePhase(void)
 
 static void SetActiveSpwmOutput(uint8_t positive_half_cycle)
 {
-  uint32_t ccer = htim1.Instance->CCER;
+  LL_TIM_CC_DisableChannel(htim1.Instance, LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH1N);
 
-  ccer &= ~(TIM_CCER_CC1E | TIM_CCER_CC1NE);
-  ccer |= positive_half_cycle ? TIM_CCER_CC1E : TIM_CCER_CC1NE;
-
-  htim1.Instance->CCER = ccer;
+  if (positive_half_cycle != 0U)
+  {
+    LL_TIM_CC_EnableChannel(htim1.Instance, LL_TIM_CHANNEL_CH1);
+  }
+  else
+  {
+    LL_TIM_CC_EnableChannel(htim1.Instance, LL_TIM_CHANNEL_CH1N);
+  }
 }
 
-static void UpdateSpwmDuty(uint16_t index)
+static void Uint16ToString(uint16_t value, char *buffer)
 {
-  uint8_t positive_half_cycle = (index < SINE_TABLE_SIZE) ? 1U : 0U;
-  float magnitude = positive_half_cycle ? sin_table[index] : -sin_table[index];
+  char reversed[5];
+  uint8_t length = 0;
 
-  if (magnitude < 0.0f)
+  do
   {
-    magnitude = 0.0f;
-  }
-  if (magnitude > 1.0f)
-  {
-    magnitude = 1.0f;
-  }
+    reversed[length++] = (char)('0' + (value % 10U));
+    value /= 10U;
+  } while ((value > 0U) && (length < sizeof(reversed)));
 
-  duty = PWM_GUARD_COUNTS + (uint32_t)(magnitude * (float)pwm_duty_span);
-  SetActiveSpwmOutput(positive_half_cycle);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty);
+  while (length > 0U)
+  {
+    *buffer++ = reversed[--length];
+  }
+  *buffer = '\0';
 }
 
 /* USER CODE END 4 */
