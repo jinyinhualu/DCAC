@@ -28,7 +28,6 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include "oled.h"
-#include "stm32f4xx_ll_tim.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,9 +39,8 @@
 /* USER CODE BEGIN PD */
 #define PI 3.1415926f
 
-#define PWM_ARR 7199U
-#define DUTY_MIN 100U
-#define DUTY_MAX (PWM_ARR - DUTY_MIN)
+#define PWM_TIMER_ARR 3600U
+#define PWM_GUARD_COUNTS 100U
 #define SINE_TABLE_SIZE 200U
 
 #define ADC_BUFFER_SIZE 2U
@@ -57,7 +55,8 @@
 
 /* USER CODE BEGIN PV */
 static uint32_t duty = 0U;
-static uint32_t pwm_duty_span = 0U;
+static uint32_t pwm_duty_min = 0U;
+static uint32_t pwm_duty_max = 0U;
 
 static float sin_1[SINE_TABLE_SIZE] = {0};
 
@@ -67,8 +66,7 @@ static uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void SinglePhase(void);
-static void Uint16ToString(uint16_t value, char *buffer);
+static void SinglePhase(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -113,9 +111,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   SinglePhase(); // Generate sine wave values
 
-  // __HAL_TIM_ENABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_1);
-  // __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty); // Set initial duty cycle
-  // __HAL_TIM_GENERATE_EVENT(&htim1, TIM_EVENTSOURCE_UPDATE);
+  pwm_duty_min = (PWM_GUARD_COUNTS < PWM_TIMER_ARR) ? PWM_GUARD_COUNTS : 0U;
+  pwm_duty_max = (PWM_TIMER_ARR > pwm_duty_min) ? (PWM_TIMER_ARR - pwm_duty_min) : PWM_TIMER_ARR;
+  duty = pwm_duty_max;
+
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Start PWM on TIM1 Channel 1
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1); // Start complementary PWM on TIM1 Channel 1
   HAL_TIM_Base_Start_IT(&htim2); // Start TIM2 in interrupt mode
@@ -134,15 +134,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    char adc_text[6];
-
     OLED_NewFrame();
     OLED_PrintASCIIString(0, 0, "ADC1:", &afont16x8, OLED_COLOR_NORMAL);
-    Uint16ToString(adc_buffer[0], adc_text);
-    OLED_PrintASCIIString(48, 0, adc_text, &afont16x8, OLED_COLOR_NORMAL);
+    OLED_PrintNumber(48, 0, adc_buffer[0], &afont16x8, OLED_COLOR_NORMAL);
     OLED_PrintASCIIString(0, 16, "ADC2:", &afont16x8, OLED_COLOR_NORMAL);
-    Uint16ToString(adc_buffer[1], adc_text);
-    OLED_PrintASCIIString(48, 16, adc_text, &afont16x8, OLED_COLOR_NORMAL);
+    OLED_PrintNumber(48, 16, adc_buffer[1], &afont16x8, OLED_COLOR_NORMAL);
     OLED_ShowFrame();
   }
   /* USER CODE END 3 */
@@ -202,7 +198,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     static int8_t duty_direction = 1;
     static uint16_t index = 0;
 
-    duty = DUTY_MIN + (uint32_t)((1 - sin_1[index]) * (DUTY_MAX - DUTY_MIN)); // Calculate duty cycle based on sine wave
+    duty = pwm_duty_min + (uint32_t)((1.0f - sin_1[index]) * (float)(pwm_duty_max - pwm_duty_min)); // Calculate duty cycle based on sine wave
 
     if (duty_direction > 0)
     {
@@ -231,44 +227,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
 }
 
-void SinglePhase(void)
+static void SinglePhase(void)
 {
   for(uint16_t i = 0; i < SINE_TABLE_SIZE; i++ )
   {
-    sin_table[i] = sinf((2.0f * PI * (float)i) / (float)SINE_TABLE_SIZE);
+    float value = sinf(PI * i / (SINE_TABLE_SIZE - 1U));
+    sin_1[i] = (value > 0.0f) ? value : 0.0f;
   }
-}
-
-static void SetActiveSpwmOutput(uint8_t positive_half_cycle)
-{
-  LL_TIM_CC_DisableChannel(htim1.Instance, LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH1N);
-
-  if (positive_half_cycle != 0U)
-  {
-    LL_TIM_CC_EnableChannel(htim1.Instance, LL_TIM_CHANNEL_CH1);
-  }
-  else
-  {
-    LL_TIM_CC_EnableChannel(htim1.Instance, LL_TIM_CHANNEL_CH1N);
-  }
-}
-
-static void Uint16ToString(uint16_t value, char *buffer)
-{
-  char reversed[5];
-  uint8_t length = 0;
-
-  do
-  {
-    reversed[length++] = (char)('0' + (value % 10U));
-    value /= 10U;
-  } while ((value > 0U) && (length < sizeof(reversed)));
-
-  while (length > 0U)
-  {
-    *buffer++ = reversed[--length];
-  }
-  *buffer = '\0';
 }
 
 /* USER CODE END 4 */
