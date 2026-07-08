@@ -38,13 +38,16 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define PI 3.1415926f
+#define ROOT_2 1.4142f
 
 #define PWM_TIMER_ARR 8400U
-#define PWM_GUARD_COUNTS 2330U
-#define SINE_TABLE_SIZE 4660U
+#define AMP_TO_PERCENT 0.2f
+#define HALF_PERIOD_PARTS 200U
 
 #define ADC_BUFFER_SIZE 2U
 #define ADC_FILTER_SAMPLES 16U
+#define ADC_PEAK_HOLD_WINDOWS 20U
+#define ADC_PEAK_DECAY_STEP 8U
 #define OLED_REFRESH_MS 50U
 /* USER CODE END PD */
 
@@ -56,17 +59,17 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static uint32_t duty = 0U;
-static uint32_t pwm_duty_min = 0U;
-static uint32_t pwm_duty_max = 0U;
+static uint32_t duty = PWM_TIMER_ARR / 2U; // Initial duty cycle set to 50%
 
-static float sin_1[SINE_TABLE_SIZE] = {0};
+static float sin_1[HALF_PERIOD_PARTS] = {0};
 
 static volatile uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
 static volatile uint16_t adc_display_buffer[ADC_BUFFER_SIZE] = {0};
 
-static float IO = 0.0f; // Output current
-static float UO = 0.0f; // Output voltage
+volatile float AIMUO = 0.0f; // Output current
+volatile float UO = 0.0f; // Output voltage
+volatile float AIMIO = 0.0f; // Output current
+volatile float IO = 0.0f; // Output voltage
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -117,10 +120,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
   SinglePhase(); // Generate sine wave values
 
-  pwm_duty_min = (PWM_GUARD_COUNTS < PWM_TIMER_ARR) ? PWM_GUARD_COUNTS : 0U;
-  pwm_duty_max = (PWM_TIMER_ARR > pwm_duty_min) ? (PWM_TIMER_ARR - pwm_duty_min) : PWM_TIMER_ARR;
-  duty = pwm_duty_max;
-
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Start PWM on TIM1 Channel 1
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1); // Start complementary PWM on TIM1 Channel 1
@@ -149,10 +148,11 @@ int main(void)
       last_oled_refresh = HAL_GetTick();
 
       OLED_NewFrame();
-      OLED_PrintASCIIString(0, 0, "ADC1:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 0, IO, 2U, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintASCIIString(0, 16, "ADC2:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 16, UO, 2U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 0, "AIMU0:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(60, 0, AIMUO, 3U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 16, "U0:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(60, 16, UO, 3U, &afont16x8, OLED_COLOR_NORMAL);
+    // OLED_DrawImage(32, 0, &xiaomiImg, OLED_COLOR_NORMAL);
       OLED_ShowFrame();
     }
   }
@@ -213,6 +213,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     static uint16_t index = 0;
     static uint16_t adc_peak[ADC_BUFFER_SIZE] = {0U};
     static uint16_t adc_sample_count = 0U;
+    static uint16_t adc_hold_count[ADC_BUFFER_SIZE] = {0U};
 
     if (adc_buffer[0] > adc_peak[0])
     {
@@ -226,19 +227,43 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
     if (adc_sample_count >= ADC_FILTER_SAMPLES)
     {
-      adc_display_buffer[0] = adc_peak[0];
-      adc_display_buffer[1] = adc_peak[1];
+      for (uint8_t i = 0U; i < ADC_BUFFER_SIZE; i++)
+      {
+        if (adc_peak[i] >= adc_display_buffer[i])
+        {
+          adc_display_buffer[i] = adc_peak[i];
+          adc_hold_count[i] = 0U;
+        }
+        else if (adc_hold_count[i] < ADC_PEAK_HOLD_WINDOWS)
+        {
+          adc_hold_count[i]++;
+        }
+        else if (adc_display_buffer[i] > ADC_PEAK_DECAY_STEP)
+        {
+          adc_display_buffer[i] -= ADC_PEAK_DECAY_STEP;
+        }
+        else
+        {
+          adc_display_buffer[i] = 0U;
+        }
+      }
+
       adc_peak[0] = 0U;
       adc_peak[1] = 0U;
       adc_sample_count = 0U;
     }
 
-    IO = (float)adc_display_buffer[0] * 3.3f / 4095.0f; // Convert ADC value to voltage for current
-    UO = (float)adc_display_buffer[1] * 3.3f / 4095.0f; // Convert ADC value to voltage for output voltage
+    AIMUO = 3.3f / ROOT_2; // Convert ADC value to current for output current
+    UO = (float)adc_display_buffer[0] * 3.3f / (4095.0f * ROOT_2); // Convert ADC value to voltage for output voltage
+    AIMIO = 3.3f / ROOT_2;
+    IO = (float)adc_display_buffer[1] * 3.3f / (4095.0f * ROOT_2);
 
-    duty = pwm_duty_min + (uint32_t)((1.0f - sin_1[index++]) * (float)(pwm_duty_max - pwm_duty_min)); // Calculate duty cycle based on sine wave
+    float sine_value = sin_1[index++];
+    float duty_ratio = 0.5f + (sine_value - 0.5f) * AMP_TO_PERCENT;
 
-    if (index >= SINE_TABLE_SIZE)
+    duty = (uint32_t)(duty_ratio * (float)PWM_TIMER_ARR); // Keep frequency unchanged, only adjust duty swing
+
+    if (index >= HALF_PERIOD_PARTS)
     {
       index = 0;
     }
@@ -249,9 +274,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 static void SinglePhase(void)
 {
-  for(uint16_t i = 0; i < SINE_TABLE_SIZE; i++ )
+  for(uint16_t i = 0; i < HALF_PERIOD_PARTS; i++ )
   {
-    float value = sinf(PI * i / (SINE_TABLE_SIZE - 1U));
+    float value = sinf(PI * i / (HALF_PERIOD_PARTS - 1U));
     sin_1[i] = (value > 0.0f) ? value : 0.0f;
   }
 }

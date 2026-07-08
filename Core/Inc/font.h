@@ -42,5 +42,6 @@ typedef struct Image {
 extern const Image bilibiliImg;
 extern const Image Img_test;
 extern const Image voiceImg;
+extern const Image xiaomiImg;
 
 #endif // __FONT_H
