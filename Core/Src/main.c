@@ -40,8 +40,8 @@
 #define PI 3.1415926f
 
 #define PWM_TIMER_ARR 8400U
-#define PWM_GUARD_COUNTS 233U
-#define SINE_TABLE_SIZE 466U
+#define PWM_GUARD_COUNTS 2330U
+#define SINE_TABLE_SIZE 4660U
 
 #define ADC_BUFFER_SIZE 2U
 #define ADC_FILTER_SAMPLES 16U
@@ -211,19 +211,25 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM2) // Check if the interrupt is from TIM2
   {
     static uint16_t index = 0;
-    static uint32_t adc_sum[ADC_BUFFER_SIZE] = {0U};
+    static uint16_t adc_peak[ADC_BUFFER_SIZE] = {0U};
     static uint16_t adc_sample_count = 0U;
 
-    adc_sum[0] += adc_buffer[0];
-    adc_sum[1] += adc_buffer[1];
+    if (adc_buffer[0] > adc_peak[0])
+    {
+      adc_peak[0] = adc_buffer[0];
+    }
+    if (adc_buffer[1] > adc_peak[1])
+    {
+      adc_peak[1] = adc_buffer[1];
+    }
     adc_sample_count++;
 
     if (adc_sample_count >= ADC_FILTER_SAMPLES)
     {
-      adc_display_buffer[0] = (uint16_t)(adc_sum[0] / ADC_FILTER_SAMPLES);
-      adc_display_buffer[1] = (uint16_t)(adc_sum[1] / ADC_FILTER_SAMPLES);
-      adc_sum[0] = 0U;
-      adc_sum[1] = 0U;
+      adc_display_buffer[0] = adc_peak[0];
+      adc_display_buffer[1] = adc_peak[1];
+      adc_peak[0] = 0U;
+      adc_peak[1] = 0U;
       adc_sample_count = 0U;
     }
 
