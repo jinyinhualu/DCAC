@@ -28,65 +28,23 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include "oled.h"
+#include "pll.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef struct SOGI{
-    float ualfa_0;      // 输入信号 alpha 分量
-    float SOGI_Ualfa;   // 输出正交 alpha
-    float SOGI_Ubeta;   // 输出正交 beta
 
-    float integral_2;   // alpha内部积分
-    float integral_3;   // beta内部积分
-
-    float Ugird_W0;     // ω0 = 2πf
-    float samp_t;       // 采样周期
-} SOGI_t;
-
-typedef struct {
-    float kp;
-    float ki;
-    float kd;
-    float ek;
-    float ek_1;
-    float ek_2;
-    float uk;
-    float uk_1;
-} PID_t;
-
-
-typedef struct {
-    float wt;       // 当前相位
-    float w0;       // 当前角频�??????????????????
-    PID_t pid;      // PLL的PID
-    SOGI_t sogi;    // SOGI结构
-    float sin_wt;
-    float cos_wt;
-    float frequency_hz;
-} PLL_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define PI 3.1415926f
-#define ROOT_2 1.4142f
 
 #define PWM_TIMER_ARR 8400U
 #define AMP_TO_PERCENT 0.2f
 #define HALF_PERIOD_PARTS 200U
 
 #define ADC_BUFFER_SIZE 2U
-#define TIM2_UPDATE_HZ 10000.0f
-#define POWER_FREQ_HZ 50.0f
-#define SOGI_SAMPLE_TIME (1.0f / TIM2_UPDATE_HZ)
-#define SOGI_K ROOT_2
-
-#define PLL_BANDWIDTH_HZ 20.0f
-#define PLL_DAMPING 0.707f
-#define PLL_MIN_FREQ_HZ 45.0f
-#define PLL_MAX_FREQ_HZ 55.0f
-#define PLL_MIN_SIGNAL 0.01f
 
 #define ADC_OFFSET_ALPHA 0.0002f
 #define ADC_MAX_COUNTS 4095.0f
@@ -116,7 +74,7 @@ static PLL_t uo_pll;
 
 volatile float UO = 0.0f; // Output voltage
 volatile float UO_PLL_THETA = 0.0f;
-volatile float UO_PLL_FREQ = POWER_FREQ_HZ;
+volatile float UO_PLL_FREQ = PLL_NOMINAL_FREQ_HZ;
 volatile float UO_ADC_COUNTS = ADC_OFFSET_INIT_COUNTS;
 /* USER CODE END PV */
 
@@ -124,14 +82,6 @@ volatile float UO_ADC_COUNTS = ADC_OFFSET_INIT_COUNTS;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void SinglePhase(void);
-static void SOGI_Init(SOGI_t *sogi);
-static void SOGI_Update(SOGI_t *sogi, float input);
-static float SOGI_GetRms(const SOGI_t *sogi);
-static void PID_Init(PID_t *pid, float kp, float ki, float kd);
-static float PID_Update(PID_t *pid, float error, float output_min, float output_max);
-static void PLL_Init(PLL_t *pll);
-static void PLL_Update(PLL_t *pll, float input);
-static float ClampFloat(float value, float min_value, float max_value);
 static float DisplayLowPass(float display_value, float input_value);
 /* USER CODE END PFP */
 
@@ -202,7 +152,7 @@ int main(void)
     static uint32_t last_oled_refresh = 0U;
     static uint8_t display_initialized = 0U;
     static float display_uo = 0.0f;
-    static float display_freq = POWER_FREQ_HZ;
+    static float display_freq = PLL_NOMINAL_FREQ_HZ;
     static float display_adc_counts = ADC_OFFSET_INIT_COUNTS;
 
     if ((HAL_GetTick() - last_oled_refresh) >= OLED_REFRESH_MS)
@@ -298,7 +248,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     float uo_sample_ac = (uo_sample_counts - uo_offset_counts) * ADC_VREF / ADC_MAX_COUNTS;
     PLL_Update(&uo_pll, uo_sample_ac);
 
-    UO = SOGI_GetRms(&uo_pll.sogi) * UO_SENSOR_GAIN; // ADC_CHANNEL_6 / PA6
+    UO = PLL_GetRms(&uo_pll) * UO_SENSOR_GAIN; // ADC_CHANNEL_6 / PA6
     UO_PLL_THETA = uo_pll.wt;
     UO_PLL_FREQ = uo_pll.frequency_hz;
 
@@ -323,144 +273,6 @@ static void SinglePhase(void)
     float value = sinf(PI * i / (HALF_PERIOD_PARTS - 1U));
     sin_1[i] = (value > 0.0f) ? value : 0.0f;
   }
-}
-
-static void SOGI_Init(SOGI_t *sogi)
-{
-  sogi->ualfa_0 = 0.0f;
-  sogi->SOGI_Ualfa = 0.0f;
-  sogi->SOGI_Ubeta = 0.0f;
-  sogi->integral_2 = 0.0f;
-  sogi->integral_3 = 0.0f;
-  sogi->Ugird_W0 = 2.0f * PI * POWER_FREQ_HZ;
-  sogi->samp_t = SOGI_SAMPLE_TIME;
-}
-
-static void SOGI_Update(SOGI_t *sogi, float input)
-{
-  float alpha_error = 0.0f;
-
-  sogi->ualfa_0 = input;
-  alpha_error = sogi->ualfa_0 - sogi->SOGI_Ualfa;
-
-  sogi->integral_2 += (SOGI_K * alpha_error - sogi->SOGI_Ubeta)
-                    * sogi->Ugird_W0
-                    * sogi->samp_t;
-  sogi->SOGI_Ualfa = sogi->integral_2;
-
-  sogi->integral_3 += sogi->SOGI_Ualfa
-                    * sogi->Ugird_W0
-                    * sogi->samp_t;
-  sogi->SOGI_Ubeta = sogi->integral_3;
-}
-
-static float SOGI_GetRms(const SOGI_t *sogi)
-{
-  float peak = sqrtf(sogi->SOGI_Ualfa * sogi->SOGI_Ualfa + sogi->SOGI_Ubeta * sogi->SOGI_Ubeta);
-
-  return peak / ROOT_2;
-}
-
-static void PID_Init(PID_t *pid, float kp, float ki, float kd)
-{
-  pid->kp = kp;
-  pid->ki = ki;
-  pid->kd = kd;
-  pid->ek = 0.0f;
-  pid->ek_1 = 0.0f;
-  pid->ek_2 = 0.0f;
-  pid->uk = 0.0f;
-  pid->uk_1 = 0.0f;
-}
-
-static float PID_Update(PID_t *pid, float error, float output_min, float output_max)
-{
-  pid->ek = error;
-  pid->uk = pid->uk_1
-          + pid->kp * (pid->ek - pid->ek_1)
-          + pid->ki * pid->ek
-          + pid->kd * (pid->ek - 2.0f * pid->ek_1 + pid->ek_2);
-  pid->uk = ClampFloat(pid->uk, output_min, output_max);
-
-  pid->ek_2 = pid->ek_1;
-  pid->ek_1 = pid->ek;
-  pid->uk_1 = pid->uk;
-
-  return pid->uk;
-}
-
-static void PLL_Init(PLL_t *pll)
-{
-  float pll_bandwidth = 2.0f * PI * PLL_BANDWIDTH_HZ;
-
-  SOGI_Init(&pll->sogi);
-  PID_Init(&pll->pid,
-           2.0f * PLL_DAMPING * pll_bandwidth,
-           pll_bandwidth * pll_bandwidth * SOGI_SAMPLE_TIME,
-           0.0f);
-
-  pll->wt = 0.0f;
-  pll->w0 = 2.0f * PI * POWER_FREQ_HZ;
-  pll->sin_wt = 0.0f;
-  pll->cos_wt = 1.0f;
-  pll->frequency_hz = POWER_FREQ_HZ;
-}
-
-static void PLL_Update(PLL_t *pll, float input)
-{
-  float alpha = 0.0f;
-  float beta = 0.0f;
-  float signal_peak = 0.0f;
-  float phase_error = 0.0f;
-  float omega_nom = 2.0f * PI * POWER_FREQ_HZ;
-  float omega_min = 2.0f * PI * PLL_MIN_FREQ_HZ;
-  float omega_max = 2.0f * PI * PLL_MAX_FREQ_HZ;
-  float omega_correction = 0.0f;
-
-  SOGI_Update(&pll->sogi, input);
-  alpha = pll->sogi.SOGI_Ualfa;
-  beta = pll->sogi.SOGI_Ubeta;
-
-  signal_peak = sqrtf(alpha * alpha + beta * beta);
-  if (signal_peak > PLL_MIN_SIGNAL)
-  {
-    phase_error = (alpha * pll->cos_wt + beta * pll->sin_wt) / signal_peak;
-    phase_error = ClampFloat(phase_error, -1.0f, 1.0f);
-  }
-
-  omega_correction = PID_Update(&pll->pid,
-                                phase_error,
-                                omega_min - omega_nom,
-                                omega_max - omega_nom);
-  pll->w0 = ClampFloat(omega_nom + omega_correction, omega_min, omega_max);
-
-  pll->wt += pll->w0 * SOGI_SAMPLE_TIME;
-  while (pll->wt >= (2.0f * PI))
-  {
-    pll->wt -= 2.0f * PI;
-  }
-  while (pll->wt < 0.0f)
-  {
-    pll->wt += 2.0f * PI;
-  }
-
-  pll->sin_wt = sinf(pll->wt);
-  pll->cos_wt = cosf(pll->wt);
-  pll->frequency_hz = pll->w0 / (2.0f * PI);
-}
-
-static float ClampFloat(float value, float min_value, float max_value)
-{
-  if (value < min_value)
-  {
-    return min_value;
-  }
-  if (value > max_value)
-  {
-    return max_value;
-  }
-
-  return value;
 }
 
 static float DisplayLowPass(float display_value, float input_value)
