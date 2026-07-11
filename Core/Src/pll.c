@@ -28,33 +28,31 @@ void PLL_Init(PLL_t *pll)
 
 void PLL_Update(PLL_t *pll, float input)
 {
-  float alpha = 0.0f;
-  float beta = 0.0f;
-  float signal_peak = 0.0f;
-  float phase_error = 0.0f;
-  float omega_nom = 2.0f * PLL_PI * PLL_NOMINAL_FREQ_HZ;
-  float omega_min = 2.0f * PLL_PI * PLL_MIN_FREQ_HZ;
-  float omega_max = 2.0f * PLL_PI * PLL_MAX_FREQ_HZ;
-  float omega_correction = 0.0f;
+  float alpha = 0.0f;                                       //alpha分量
+  float beta = 0.0f;                                        //beta分量
+  float signal_peak = 0.0f;                                 //信号幅值
+  float phase_error = 0.0f;                                 //相位误差，范围[-1, 1]
+  float omega_nom = 2.0f * PLL_PI * PLL_NOMINAL_FREQ_HZ;    //参考角频率
+  float omega_min = 2.0f * PLL_PI * PLL_MIN_FREQ_HZ;        //最小角频率
+  float omega_max = 2.0f * PLL_PI * PLL_MAX_FREQ_HZ;        //最大角频率
+  float omega_correction = 0.0f;                            //角频率修正量
 
   SOGI_Update(&pll->sogi, input);
   alpha = pll->sogi.SOGI_Ualfa;
   beta = pll->sogi.SOGI_Ubeta;
-
   signal_peak = sqrtf(alpha * alpha + beta * beta);
+
   if (signal_peak > PLL_MIN_SIGNAL)
   {
-    phase_error = (alpha * pll->cos_wt + beta * pll->sin_wt) / signal_peak;
-    phase_error = ClampFloat(phase_error, -1.0f, 1.0f);
+    phase_error = (alpha * pll->cos_wt + beta * pll->sin_wt) / signal_peak; //相位误差计算
+    phase_error = ClampFloat(phase_error, -1.0f, 1.0f); //计算相位误差
   }
-
   omega_correction = PID_Update(&pll->pid,
                                 phase_error,
                                 omega_min - omega_nom,
-                                omega_max - omega_nom);
-  pll->w0 = ClampFloat(omega_nom + omega_correction, omega_min, omega_max);
-
-  pll->wt += pll->w0 * PLL_SAMPLE_TIME;
+                                omega_max - omega_nom); //角频率修正量计算
+  pll->w0 = ClampFloat(omega_nom + omega_correction, omega_min, omega_max); //角频率更新
+  pll->wt += pll->w0 * PLL_SAMPLE_TIME; //旋转角度更新
   while (pll->wt >= (2.0f * PLL_PI))
   {
     pll->wt -= 2.0f * PLL_PI;

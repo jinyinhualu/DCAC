@@ -40,21 +40,20 @@
 /* USER CODE BEGIN PD */
 #define PI 3.1415926f
 
-#define PWM_TIMER_ARR 8400U
-#define AMP_TO_PERCENT 0.2f
-#define HALF_PERIOD_PARTS 200U
+#define PWM_TIMER_ARR 8400U                             //定时器自动重装载值
+#define AMP_TO_PERCENT 0.2f                             //幅值占比
+#define HALF_PERIOD_PARTS 200U                          //半周期采样点数
 
-#define ADC_BUFFER_SIZE 2U
+#define ADC_BUFFER_SIZE 2U                              //ADC采样大小
 
-#define ADC_OFFSET_ALPHA 0.0002f
-#define ADC_MAX_COUNTS 4095.0f
-#define ADC_OFFSET_INIT_COUNTS (ADC_MAX_COUNTS * 0.5f)
-#define ADC_VREF 3.3f
-#define UO_ADC_INDEX 0U
-#define UO_SENSOR_GAIN 1.0f
+#define ADC_OFFSET_ALPHA 0.0002f                        //ADC偏置滤波系数
+#define ADC_MAX_COUNTS 4095.0f                          //ADC最大计数值
+#define ADC_OFFSET_INIT_COUNTS (ADC_MAX_COUNTS * 0.5f)  //ADC初始偏置计数值
+#define ADC_VREF 3.3f                                   //ADC参考电压
+#define UO_ADC_INDEX 0U                                 //ADC通道索引
+#define UO_SENSOR_GAIN 1.0f                             //输入电压
 
-#define OLED_REFRESH_MS 200U
-#define DISPLAY_FILTER_ALPHA 0.15f
+#define OLED_REFRESH_MS 200U                            //OLED刷新间隔
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -65,24 +64,23 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static uint32_t duty = PWM_TIMER_ARR / 2U; // Initial duty cycle set to 50%
+static uint32_t duty = PWM_TIMER_ARR / 2U; //初始占空比为50%
 
 static float sin_1[HALF_PERIOD_PARTS] = {0};
 
 static volatile uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
 static PLL_t uo_pll;
 
-volatile float UO = 0.0f; // Output voltage
-volatile float UO_PLL_THETA = 0.0f;
-volatile float UO_PLL_FREQ = PLL_NOMINAL_FREQ_HZ;
-volatile float UO_ADC_COUNTS = ADC_OFFSET_INIT_COUNTS;
+volatile float UO = 0.0f;                               //输入电压有效值
+volatile float UO_PLL_THETA = 0.0f;                     //输入电压锁相环角度
+volatile float UO_PLL_FREQ = PLL_NOMINAL_FREQ_HZ;       //输入电压锁相环频率
+volatile float UO_ADC_COUNTS = ADC_OFFSET_INIT_COUNTS;  //输入电压ADC采样值
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void SinglePhase(void);
-static float DisplayLowPass(float display_value, float input_value);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -147,39 +145,19 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-    // 将均值滤波移至主循环，降低定时器高频中断的CPU占用
     static uint32_t last_oled_refresh = 0U;
-    static uint8_t display_initialized = 0U;
-    static float display_uo = 0.0f;
-    static float display_freq = PLL_NOMINAL_FREQ_HZ;
-    static float display_adc_counts = ADC_OFFSET_INIT_COUNTS;
 
     if ((HAL_GetTick() - last_oled_refresh) >= OLED_REFRESH_MS)
     {
       last_oled_refresh = HAL_GetTick();
 
-      if (display_initialized == 0U)
-      {
-        display_uo = UO;
-        display_freq = UO_PLL_FREQ;
-        display_adc_counts = UO_ADC_COUNTS;
-        display_initialized = 1U;
-      }
-      else
-      {
-        display_uo = DisplayLowPass(display_uo, UO);
-        display_freq = DisplayLowPass(display_freq, UO_PLL_FREQ);
-        display_adc_counts = DisplayLowPass(display_adc_counts, UO_ADC_COUNTS);
-      }
-
       OLED_NewFrame();
       OLED_PrintASCIIString(0, 0, "U0:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 0, display_uo, 3U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 0, UO, 3U, &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintASCIIString(0, 16, "F:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 16, display_freq, 2U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 16, UO_PLL_FREQ, 2U, &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintASCIIString(0, 32, "ADC:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 32, display_adc_counts, 0U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 32, UO_ADC_COUNTS, 0U, &afont16x8, OLED_COLOR_NORMAL);
       // OLED_DrawImage(32, 0, &xiaomiImg, OLED_COLOR_NORMAL);
       OLED_ShowFrame();
     }
@@ -248,7 +226,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     float uo_sample_ac = (uo_sample_counts - uo_offset_counts) * ADC_VREF / ADC_MAX_COUNTS;
     PLL_Update(&uo_pll, uo_sample_ac);
 
-    UO = PLL_GetRms(&uo_pll) * UO_SENSOR_GAIN; // ADC_CHANNEL_6 / PA6
+    UO = PLL_GetRms(&uo_pll) * UO_SENSOR_GAIN; //PA6
     UO_PLL_THETA = uo_pll.wt;
     UO_PLL_FREQ = uo_pll.frequency_hz;
 
@@ -273,11 +251,6 @@ static void SinglePhase(void)
     float value = sinf(PI * i / (HALF_PERIOD_PARTS - 1U));
     sin_1[i] = (value > 0.0f) ? value : 0.0f;
   }
-}
-
-static float DisplayLowPass(float display_value, float input_value)
-{
-  return display_value + DISPLAY_FILTER_ALPHA * (input_value - display_value);
 }
 
 /* USER CODE END 4 */
