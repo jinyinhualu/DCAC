@@ -49,10 +49,14 @@ typedef struct {
     SOGI_t sogi;                                    //SOGI滤波器
     float sin_wt;                                   //sin(wt)，当前采样点的正弦值
     float cos_wt;                                   //cos(wt)，当前采样点的余弦值
+    float ud;                                       //d轴分量
+    float uq;                                       //q轴分量
     float frequency_hz;                             //频率(Hz)
 } PLL_t;
 
 void PLL_Init(PLL_t *pll);
+void SOGI_Update(PLL_t *pll, float input);
+void dq_pll(PLL_t *pll);
 void PLL_Update(PLL_t *pll, float input);
 float PLL_GetRms(const PLL_t *pll);
 

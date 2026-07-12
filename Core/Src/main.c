@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
-#include "dma.h"
 #include "spi.h"
 #include "tim.h"
 #include "gpio.h"
@@ -40,20 +39,20 @@
 /* USER CODE BEGIN PD */
 #define PI 3.1415926f
 
-#define PWM_TIMER_ARR 8400U                             //定时器自动重装载值
-#define AMP_TO_PERCENT 0.2f                             //幅值占比
-#define HALF_PERIOD_PARTS 200U                          //半周期采样点数
+#define PWM_TIMER_ARR 8400U                             // Timer auto-reload value
+#define AMP_TO_PERCENT 0.2f                             // PWM amplitude ratio
+#define HALF_PERIOD_PARTS 200U                          // Half-cycle table points
 
-#define ADC_BUFFER_SIZE 2U                              //ADC采样大小
+#define ADC_OFFSET_ALPHA 0.0002f                        // ADC offset filter coefficient
+#define UO_RMS_ALPHA 0.001f                             // RMS display filter coefficient
+#define ADC_MAX_COUNTS 4095.0f                          // ADC full-scale count
+#define ADC_OFFSET_INIT_COUNTS (ADC_MAX_COUNTS * 0.5f)  // Initial ADC offset count
+#define ADC_VREF 3.3f                                   // ADC reference voltage
+#define ADC_READ_TIMEOUT 1000U
+#define ADC_VPP_WINDOW_SAMPLES 1000U
+#define UO_SENSOR_GAIN 30.0f                            // Input voltage gain
 
-#define ADC_OFFSET_ALPHA 0.0002f                        //ADC偏置滤波系数
-#define ADC_MAX_COUNTS 4095.0f                          //ADC最大计数值
-#define ADC_OFFSET_INIT_COUNTS (ADC_MAX_COUNTS * 0.5f)  //ADC初始偏置计数值
-#define ADC_VREF 3.3f                                   //ADC参考电压
-#define UO_ADC_INDEX 0U                                 //ADC通道索引
-#define UO_SENSOR_GAIN 1.0f                             //输入电压
-
-#define OLED_REFRESH_MS 200U                            //OLED刷新间隔
+#define OLED_REFRESH_MS 200U                            // OLED refresh interval
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -68,19 +67,20 @@ static uint32_t duty = PWM_TIMER_ARR / 2U; //初始占空比为50%
 
 static float sin_1[HALF_PERIOD_PARTS] = {0};
 
-static volatile uint16_t adc_buffer[ADC_BUFFER_SIZE] = {0};
 static PLL_t uo_pll;
 
 volatile float UO = 0.0f;                               //输入电压有效值
 volatile float UO_PLL_THETA = 0.0f;                     //输入电压锁相环角度
 volatile float UO_PLL_FREQ = PLL_NOMINAL_FREQ_HZ;       //输入电压锁相环频率
 volatile float UO_ADC_COUNTS = ADC_OFFSET_INIT_COUNTS;  //输入电压ADC采样值
+volatile float UO_ADC_VPP = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void SinglePhase(void);
+static HAL_StatusTypeDef ADC_ReadSelectedChannel(uint32_t *adc_counts);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,7 +117,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
@@ -130,9 +129,10 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Start PWM on TIM1 Channel 1
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1); // Start complementary PWM on TIM1 Channel 1
 
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE); // Start ADC1 in DMA mode
-  __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC); // Disable DMA half/full transfer interrupts
-  HAL_TIM_Base_Start_IT(&htim2); // Start TIM2 in interrupt mode
+  if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK) // Start fixed-rate PLL/ADC sampling tick
+  {
+    Error_Handler();
+  }
 
   HAL_Delay(100); // Wait for 100ms before initializing OLED
   OLED_Init(); // Initialize OLED
@@ -156,8 +156,10 @@ int main(void)
       OLED_PrintFloat(48, 0, UO, 3U, &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintASCIIString(0, 16, "F:", &afont16x8, OLED_COLOR_NORMAL);
       OLED_PrintFloat(48, 16, UO_PLL_FREQ, 2U, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintASCIIString(0, 32, "ADC:", &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintFloat(48, 32, UO_ADC_COUNTS, 0U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 32, "VPP:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 32, UO_ADC_VPP, 3U, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 48, "ADC:", &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintFloat(48, 48, UO_ADC_COUNTS, 0U, &afont16x8, OLED_COLOR_NORMAL);
       // OLED_DrawImage(32, 0, &xiaomiImg, OLED_COLOR_NORMAL);
       OLED_ShowFrame();
     }
@@ -218,15 +220,45 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     static uint16_t index = 0;
     static float uo_offset_counts = ADC_OFFSET_INIT_COUNTS;
+    static float uo_rms_filtered = 0.0f;
+    static uint16_t vpp_sample_count = 0U;
+    static float adc_min_counts = ADC_MAX_COUNTS;
+    static float adc_max_counts = 0.0f;
+    uint32_t adc_counts = 0U;
 
-    float uo_sample_counts = (float)adc_buffer[UO_ADC_INDEX];
+    if (ADC_ReadSelectedChannel(&adc_counts) != HAL_OK)
+    {
+      return;
+    }
+
+    float uo_sample_counts = (float)adc_counts;
+
     UO_ADC_COUNTS = uo_sample_counts;
+    if (uo_sample_counts < adc_min_counts)
+    {
+      adc_min_counts = uo_sample_counts;
+    }
+    if (uo_sample_counts > adc_max_counts)
+    {
+      adc_max_counts = uo_sample_counts;
+    }
+    if (++vpp_sample_count >= ADC_VPP_WINDOW_SAMPLES)
+    {
+      UO_ADC_VPP = (adc_max_counts - adc_min_counts) * ADC_VREF / ADC_MAX_COUNTS;
+      adc_min_counts = ADC_MAX_COUNTS;
+      adc_max_counts = 0.0f;
+      vpp_sample_count = 0U;
+    }
+
     uo_offset_counts += ADC_OFFSET_ALPHA * (uo_sample_counts - uo_offset_counts);
 
     float uo_sample_ac = (uo_sample_counts - uo_offset_counts) * ADC_VREF / ADC_MAX_COUNTS;
+    // SOGI_Update(&uo_pll, uo_sample_ac);
     PLL_Update(&uo_pll, uo_sample_ac);
 
-    UO = PLL_GetRms(&uo_pll) * UO_SENSOR_GAIN; //PA6
+    float uo_rms = PLL_GetRms(&uo_pll) * UO_SENSOR_GAIN; //PA5
+    uo_rms_filtered += UO_RMS_ALPHA * (uo_rms - uo_rms_filtered);
+    UO = uo_rms_filtered;
     UO_PLL_THETA = uo_pll.wt;
     UO_PLL_FREQ = uo_pll.frequency_hz;
 
@@ -242,6 +274,31 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, duty); // Update PWM duty cycle
   }
+}
+
+static HAL_StatusTypeDef ADC_ReadSelectedChannel(uint32_t *adc_counts)
+{
+  uint32_t adc_timeout = ADC_READ_TIMEOUT;
+
+  if (HAL_ADC_Start(&hadc1) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  while ((__HAL_ADC_GET_FLAG(&hadc1, ADC_FLAG_EOC) == RESET) && (adc_timeout > 0U))
+  {
+    adc_timeout--;
+  }
+
+  if (adc_timeout == 0U)
+  {
+    (void)HAL_ADC_Stop(&hadc1);
+    return HAL_TIMEOUT;
+  }
+
+  *adc_counts = HAL_ADC_GetValue(&hadc1);
+
+  return HAL_ADC_Stop(&hadc1);
 }
 
 static void SinglePhase(void)
